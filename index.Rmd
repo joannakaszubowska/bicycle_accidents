@@ -1,0 +1,329 @@
+---
+title: "Bicycle accidents in Gdańsk from 2018 to 2022"
+author: "Joanna Kaszubowska"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE) 
+options(width=100)
+library("car") # funkcja vif()
+library("ggplot2") # wykresy - funkcja ggplot()
+library("pscl") #pseudo-R2 funkcja pR2()
+library("lmtest") #testy LR i Walda globalne
+library("ggcorrplot")
+library("tidyr")
+library("factoextra")
+library(readxl)
+daneee <- read_excel("C:/Users/48726/OneDrive/Pulpit/całość - kopia.xlsx")
+dane <- daneee[,c(7:19, 22)]
+```
+
+<br><br>
+
+# Introduction
+
+The aim of this analysis is to investigate the factors influencing the number of bicycle accidents in Gdańsk from 2018 to 2022. For the study, data were collected from publicly available websites. Information on the number of accidents was obtained from sewik.pl. Data on bicycle rides were sourced from traffic intensity information provided by the City Office, and weather data were retrieved from danepubliczne.imgw.pl.
+
+```{r}
+summary(dane)
+```
+<br><br>
+
+# 1. PCA analysis 
+Due to different measurement scales, it was decided to standardize the variable values. Then, the correlation matrices of all variables were determined. 
+
+```{r}
+dane_scale <- scale(dane)
+dane_scale_frame <- data.frame(dane_scale)
+
+cor_dane_scale_frame <- cor(dane_scale_frame, method='pearson')
+ggcorrplot(cor_dane_scale_frame, 
+           lab = TRUE,                   
+           method = "square",           
+           hc.order = TRUE,             
+           type = "full",               
+           colors = c("blue", "white", "red"),
+           show.legend = FALSE,
+           lab_size =2.2) +
+  ggtitle("correlation matrix") +  
+  theme(plot.title = element_text(hjust = 0.5, size =17))
+```
+<br><br>
+
+Based on the presented correlation matrices and partial correlations, in order to remove extremely weak and strong correlations from further analyses, it was decided to remove the variables: car, temperature, no pedestrians, wind, precipitation, pedestrian crossing, public transport, bicycle, roadway.
+
+<br>
+
+```{r}
+dane_scale_frame2 <- dane_scale_frame[,c(2,4:5,7,10:12)]
+cor_dane_scale_frame2 <- cor(dane_scale_frame2, method='pearson')
+ggcorrplot(cor_dane_scale_frame2, 
+           lab = TRUE,                   
+           method = "square",           
+           hc.order = TRUE,             
+           type = "full",               
+           colors = c("blue", "white", "red"),
+           show.legend = FALSE) +
+  ggtitle("correlation matrix after reduction of variables") +  
+  theme(plot.title = element_text(hjust = 0.5, size =17))
+```
+<br><br>
+
+## 1.1. Selection of the main components
+
+```{r}
+wyniki <- princomp(dane_scale_frame2, cor=TRUE)
+summary(wyniki)
+
+wyniki$sdev^2
+
+plot(wyniki$sdev^2, 
+     type = "b",                
+     main = "Scree plot", 
+     xlab = "principal components",   
+     ylab = "eigenvalues",       
+     col = "grey30",                   
+     pch = 19)                      
+lines(wyniki$sdev^2, col = "grey30")
+``` 
+
+<br>
+
+The results of the analysis show that the first 2 principal components explain nearly 70% of the cumulative variance. The first two components show eigenvalues above 1. The first principal component explains the largest part of the total variance. The graph shows a rapid decrease in eigenvalues in the initial components. After the 2nd component, the graph line begins to gradually flatten out. Based on the variability criterion, Kaiser's criterion and Catelle's rule, it can be concluded that the first 2 components should be taken into account for further analysis.
+
+<br><br>
+
+## 1.2. Loadings of variables of the first two principal components
+
+```{r}
+loadings <- wyniki$loadings
+top_2_loadings <- loadings[, 1:2]
+top_2_loadings_df <- as.data.frame(top_2_loadings)
+top_2_loadings_df$Variable <- rownames(top_2_loadings_df)
+
+top_2_long <- pivot_longer(top_2_loadings_df, 
+                            cols = starts_with("Comp"),  
+                            names_to = "Principal_Component", 
+                            values_to = "Loading")
+
+ggplot(top_2_long, aes(x = reorder(Variable, Loading), y = Loading)) +
+  geom_bar(stat = "identity", fill = "blue") +  
+  geom_text(aes(label = round(Loading, 2)),       
+            hjust = ifelse(top_2_long$Loading < 0, 1.2, -0.2),  
+            color = "black", size = 3) +          
+  coord_flip() +  
+  facet_wrap(~ Principal_Component, scales = "free_y") +  
+  labs(x = "variables", y = "PCA loading", 
+       title = "Bar charts for each PCA component") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+```
+<br><br>
+
+## 1.3. Correlation coefficients between original variables and principal components
+```{r}
+wyniki$loadings %*% diag(wyniki$sdev)[,1:2]
+```
+<br><br>
+
+## 1.4. biplot
+```{r}
+fviz_pca_biplot(wyniki, repel = TRUE) + 
+  ggtitle("Biplot of Principal Component Analysis") +
+  theme(plot.title = element_text(hjust = 0.5, size =17)) +
+  xlab("PCA2") +
+  ylab("PCA1")
+```
+<br><br>
+
+The most significant factors affecting PC1 are: the number of rides (0.93), accidents on the road (0.88) and on the sidewalk (0.78) and bicycle crossing (0.77). It can be assumed that PC1 reflects the intensity of bicycle traffic and the road infrastructure where bicycle accidents occur.
+The greatest influence on the creation of PC2 is exerted by the variables: motorcycle, moped and truck. The variables have opposite values. The opposite influence on PC2 means that motorcycles/mopeds and trucks appear more often in different conditions or places of incidents. It can be assumed that PC2 reflects the participation of lighter vehicles in incidents or the characteristics of infrastructure that are more favorable for two-wheelers.
+
+<br><br>
+
+# 2. Model Poissona
+
+### 2.1 Manual model design and optimization
+
+At the beginning, it was decided to examine to what extent the main components obtained in the principal component analysis influence the explanation of the dependent variable, which is the number of accidents. For this purpose, two models were built:
+model 1, in which only the first principal component (PC1) was considered as an explanatory variable,
+model 2, in which both the first and the second principal components (PC1 and PC2) are explanatory variables.
+
+
+```{r}
+pca_scores <- data.frame(wyniki$scores[, 1:2])  
+colnames(pca_scores) <- c("PC1", "PC2")  
+dane_po_PCA <- cbind(daneee, pca_scores)
+
+model1 <- glm(all.accidents ~ PC1, 
+                      family = poisson(link = "log"), 
+                      data = dane_po_PCA)
+summary(model1)
+
+model2 <- glm(all.accidents ~ PC1 + PC2, 
+          family = poisson(link = "log"), 
+          data = dane_po_PCA)
+summary(model2)
+
+anova(model1,model2, test = "Chisq")
+
+```
+<br>
+
+Adding the PC2 component does not improve the model - the AIC value increased slightly, and the PC2 variable itself is not statistically significant.
+The results of the analysis of deviance (ANOVA) between the two Poisson models indicate that adding the second principal component (PC2) to the model does not lead to a significant improvement in the model's fit to the data. The value of (Pr(>Chi)) is 0.68, so there is not enough evidence that adding PC2 to the model improves the model's fit in a statistically significant way.
+
+In the next step, it was decided to examine a model that would include as explanatory variables the original variables from the database that had some of the highest loadings in the first principal component (PC1). By trial and error, a model was sought that showed the lowest level of AIC and residual deviance. The best-fitting model, as explanatory variables, included the number of rides and the number of accidents at the bicycle crossing.
+
+<br>
+
+```{r}
+model3 <- glm(all.accidents ~  number.of.cyclists + cycle.crossing, 
+                       family = poisson(link="log"),
+                       data = dane_po_PCA)
+summary(model3)
+
+anova(model1,model3, test = "Chisq")
+
+
+ocena_modelu_GLM <- function(model) {
+  st_dev_of_res <- (model$deviance/model$df.residual)^0.5
+  AIC <- model$aic
+  invisible (capture.output({
+  McFadden<- pR2(model)[4]
+  Cragg_Uhler<- pR2(model)[6]}))
+  ocena <- data.frame(st_dev_of_res, AIC, McFadden, Cragg_Uhler)
+  return(ocena)
+}
+ocena_modeli <- rbind(
+  model1 =ocena_modelu_GLM(model1),
+  model2 = ocena_modelu_GLM(model2),
+  model3 = ocena_modelu_GLM(model3))
+
+ocena_modeli
+```
+
+<br>
+
+A model with two original variables was selected for further analyses, because they show a better fit to the data and more stable results (lower standard deviation of residuals - smaller prediction error, lower AIC value - better model fit, lower value of residual deviance - better explanation of data variability, higher pseudo R2 value in the McFadden and Cragg_Uhler tests - better explanation of data variability). The ANOVA test result indicates that the improvement compared to Model 1 is statistically significant. PCA analysis was helpful in selecting significant predictors.
+
+<br><br>
+
+### 2.2 Test of significance of all independent variables in the model
+
+```{r}
+waldtest(model3)
+```
+<br>
+
+The result of the Wald test is highly statistically significant, so we reject the null hypothesis of no influence of the explanatory variables on the number of bicycle accidents. A high value of the F statistic indicates high statistical significance of the test.
+
+<br><br>
+
+## 2.3. Diagnostic charts
+
+### Residual plot
+```{r}
+plot(model3, which = 1)
+```
+<br>
+
+The residual plot for Model 3 shows a certain curvilinear pattern, which may mean that the relationship between predictors and the number of accidents is not linear. It was decided to additionally check the presence and influence of influential and outlier observations.
+
+<br>
+
+### Identification of influential and outlier observations
+```{r}
+plot(model3, which = 4)
+cooks_values <- cooks.distance(model3)
+abline(h = 4 / nrow(dane_po_PCA), col = "red", lty = 2)
+
+outlierTest(model3)
+```
+<br>
+
+The Cook's Distance plot indicates that three observations have a value greater than the established cut-off line, which may suggest that they are influential points.
+The Outliers test showed that the eighth observation is an outlier.
+It was decided to check how the model fit and the residual plot would improve after removing influential values from the model3.
+
+<br>
+
+```{r}
+model4 <- glm(all.accidents ~  number.of.cyclists + cycle.crossing,
+                       family = poisson(link="log"),
+                       data = dane_po_PCA, subset = c(1:7,9:40, 43:60))
+summary(model4)
+
+plot(model4, which = 1)
+```
+
+<br>
+
+After removing outliers and influential values, a significant improvement in model fit was observed. However, the residual plot still shows a curvilinear pattern. Therefore, the decision was made to apply log transformation to the explanatory variables to better capture this nonlinearity and improve the model fit.
+
+<br>
+
+```{r}
+
+dane_po_PCA$log_number.of.cyclists <- log(dane_po_PCA$number.of.cyclists + 1)
+dane_po_PCA$log_cycle.crossing <- log(dane_po_PCA$cycle.crossing + 1)
+
+model5 <- glm(all.accidents ~ log_number.of.cyclists + log_cycle.crossing,
+                 family = poisson(link = "log"), data = dane_po_PCA, subset = c(1:7,9:40, 43:60))
+summary(model5)
+
+plot(model5, which = 1)
+```
+<br>
+
+After applying a log transformation of the explanatory variables, the residual plot shows an improvement in model fit compared to previous versions.
+
+<br>
+
+
+```{r}
+
+model_evaluation_GLM <- function(model) {
+  st_dev_of_res <- (model$deviance/model$df.residual)^0.5
+  AIC <- model$aic
+  invisible (capture.output({
+  McFadden<- pR2(model)[4]
+  Cragg_Uhler<- pR2(model)[6]}))
+  ocena <- data.frame(st_dev_of_res, AIC, McFadden, Cragg_Uhler)
+  return(ocena)
+}
+model_evaluation <- rbind(
+  model4 = model_evaluation_GLM(model4),
+  model5 = model_evaluation_GLM(model5))
+
+model_evaluation
+```
+<br><br>
+
+# Conclusions
+The Poisson model with log transformation of variables gives a relatively good fit, with significant variables affecting the number of accidents, although there is scope for further optimization, especially in the nonlinear relationships.
+
+The estimate for the first variable is 0.71834, which means that if the log of the number of trips (log_number.of.cyclists) increases by 1 unit, the expected number of accidents increases by exp(0.71834). This is a significant variable indicating a higher risk of accidents as traffic density increases.
+
+The estimate for the second variable is 0.37683, which means that if the log of the number of accidents at bicycle crossings (log_cycle.crossing) increases by 1 unit, the expected number of accidents increases by exp(0.37683)
+
+More road traffic, as measured by the number of trips, is associated with a higher risk of accidents, which is consistent with the intuition that higher traffic density increases the risk of collisions.
+
+The increase in the number of accidents at bicycle crossings is associated with the overall increase in the number of road accidents, which suggests the need to improve the infrastructure and safety of these crossings.
+
+Nonlinear Relationships and Model Refinement
+Some relationships may not be fully captured in a linear model, suggesting the potential benefit of incorporating interaction terms or nonlinear transformations for better predictive power.
+
+Infrastructure and Urban Planning Implications
+The results highlight the need for better urban planning, including the redesign of high-risk intersections, improved lighting, and dedicated bike lanes to reduce accident frequency.
+
+Potential for Predictive Use
+The Poisson model can serve as a predictive tool to estimate accident frequency based on traffic and environmental factors, aiding decision-makers in risk assessment and mitigation strategies.
+
+Further Research Directions
+Including additional variables such as driver behavior, road surface conditions, or more granular spatial data could improve the model's accuracy and lead to more actionable insights.
+
